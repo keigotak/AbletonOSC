@@ -1,5 +1,6 @@
 from typing import Tuple, Any, Callable, Optional
 from .handler import AbletonOSCHandler
+import Live
 
 
 class TrackHandler(AbletonOSCHandler):
@@ -30,7 +31,6 @@ class TrackHandler(AbletonOSCHandler):
             return track_callback
 
         methods = [
-            "delete_device",
             "stop_all_clips"
         ]
         properties_r = [
@@ -156,6 +156,113 @@ class TrackHandler(AbletonOSCHandler):
          - type: 0 = audio_effect, 1 = instrument, 2 = midi_effect
          - class_name: e.g. Operator, Reverb, AuPluginDevice, PluginDevice, InstrumentGroupDevice
         """
+        #--------------------------------------------------------------------------------
+        # Track: Load device from browser
+        # Usage: /live/track/load/device [track_index, "Audio Effects/Compressor"]
+        #--------------------------------------------------------------------------------
+        def track_load_device(track, params):
+            device_uri = str(params[0])
+            parts = device_uri.split("/")
+
+            if len(parts) < 2:
+                self.logger.error("Invalid device URI: %s (expected 'Category/Name' or 'Category/Sub/Name')" % device_uri)
+                return ("error", "invalid_uri")
+
+            app = Live.Application.get_application()
+            browser = app.browser
+
+            category_map = {
+                "Audio Effects": browser.audio_effects,
+                "Instruments": browser.instruments,
+                "MIDI Effects": browser.midi_effects,
+                "Sounds": browser.sounds,
+                "Drums": browser.drums,
+                "Packs": browser.packs,
+                "Samples": browser.samples,
+            }
+
+            category_name = parts[0]
+            category = category_map.get(category_name)
+            if not category:
+                self.logger.error("Unknown device category: %s" % category_name)
+                return ("error", "unknown_category")
+
+            # Navigate through sub-paths (e.g. Sounds/Bass/808 Pure.adg)
+            parent = category
+            for i in range(1, len(parts) - 1):
+                found = False
+                for child in parent.children:
+                    if child.name == parts[i]:
+                        parent = child
+                        found = True
+                        break
+                if not found:
+                    self.logger.error("Sub-category not found: %s" % parts[i])
+                    return ("error", "not_found: %s" % parts[i])
+
+            # Find the target device/preset
+            device_name = parts[-1]
+            target_item = None
+            for child in parent.children:
+                if child.name == device_name:
+                    if child.is_loadable:
+                        target_item = child
+                    else:
+                        for sub_child in child.children:
+                            if sub_child.is_loadable:
+                                target_item = sub_child
+                                break
+                    break
+
+            if target_item:
+                self.song.view.selected_track = track
+                browser.load_item(target_item)
+                self.logger.info("Loaded device '%s' on track '%s'" % (device_name, track.name))
+                return (device_name, "loaded")
+            else:
+                self.logger.error("Device not found in browser: %s" % device_name)
+                return ("error", "not_found")
+
+        self.osc_server.add_handler("/live/track/load/device", create_track_callback(track_load_device))
+
+        #--------------------------------------------------------------------------------
+        # Track: Delete device by index
+        # Usage: /live/track/delete/device [track_index, device_index]
+        #--------------------------------------------------------------------------------
+        def track_delete_device(track, params):
+            device_index = int(params[0])
+            if device_index < 0 or device_index >= len(track.devices):
+                self.logger.error("Device index out of range: %d (track has %d devices)" % (device_index, len(track.devices)))
+                return ("error", "index_out_of_range")
+            device = track.devices[device_index]
+            device_name = device.name
+            track.delete_device(device_index)
+            self.logger.info("Deleted device '%s' (index %d) from track '%s'" % (device_name, device_index, track.name))
+            return (device_name, "deleted")
+
+        self.osc_server.add_handler("/live/track/delete/device", create_track_callback(track_delete_device))
+
+        #--------------------------------------------------------------------------------
+        # Track: Move device to new position
+        # Usage: /live/track/move/device [track_index, device_index, new_position]
+        #--------------------------------------------------------------------------------
+        def track_move_device(track, params):
+            device_index = int(params[0])
+            new_position = int(params[1])
+            if device_index < 0 or device_index >= len(track.devices):
+                self.logger.error("Device index out of range: %d" % device_index)
+                return ("error", "index_out_of_range")
+            if new_position < 0 or new_position >= len(track.devices):
+                self.logger.error("New position out of range: %d" % new_position)
+                return ("error", "position_out_of_range")
+            device = track.devices[device_index]
+            device_name = device.name
+            self.song.move_device(device, track, new_position)
+            self.logger.info("Moved device '%s' from %d to %d on track '%s'" % (device_name, device_index, new_position, track.name))
+            return (device_name, device_index, new_position)
+
+        self.osc_server.add_handler("/live/track/move/device", create_track_callback(track_move_device))
+
         self.osc_server.add_handler("/live/track/get/num_devices", create_track_callback(track_get_num_devices))
         self.osc_server.add_handler("/live/track/get/devices/name", create_track_callback(track_get_device_names))
         self.osc_server.add_handler("/live/track/get/devices/type", create_track_callback(track_get_device_types))
