@@ -167,6 +167,135 @@ class ClipHandler(AbletonOSCHandler):
         self.osc_server.add_handler("/live/clip/add/notes", create_clip_callback(clip_add_notes))
         self.osc_server.add_handler("/live/clip/remove/notes", create_clip_callback(clip_remove_notes))
 
+        #--------------------------------------------------------------------------------
+        # Automation envelope handlers
+        #--------------------------------------------------------------------------------
+        def clip_add_automation(clip, params: Tuple[Any] = ()):
+            """Add automation envelope step: (device_idx, param_idx, time, value, duration)"""
+            if len(params) < 5:
+                raise ValueError("add_automation requires: device_idx, param_idx, time, value, duration")
+            device_idx, param_idx = int(params[0]), int(params[1])
+            time_val, value, duration = float(params[2]), float(params[3]), float(params[4])
+
+            track = clip.canonical_parent.canonical_parent
+            device = track.devices[device_idx]
+            parameter = device.parameters[param_idx]
+
+            envelope = clip.automation_envelope(parameter)
+            if envelope is None:
+                clip.create_automation_envelope(parameter)
+                envelope = clip.automation_envelope(parameter)
+
+            if envelope is not None:
+                # insert_step の実際の引数順序: (time, duration, value)
+                # value は 0.0-1.0 の正規化値（スケーリング不要）
+                envelope.insert_step(time_val, duration, value)
+                self.logger.info("OK insert_step(t=%.2f d=%.2f v=%.2f) clip=%s" %
+                                 (time_val, duration, value, clip.name))
+            else:
+                self.logger.warning("FAIL envelope None dev=%d param=%d" %
+                                    (device_idx, param_idx))
+
+        def clip_clear_automation(clip, params: Tuple[Any] = ()):
+            """Clear automation for a specific parameter: (device_idx, param_idx)"""
+            if len(params) < 2:
+                raise ValueError("clear_automation requires: device_idx, param_idx")
+            device_idx, param_idx = int(params[0]), int(params[1])
+
+            track = clip.canonical_parent.canonical_parent
+            device = track.devices[device_idx]
+            parameter = device.parameters[param_idx]
+
+            clip.clear_envelope(parameter)
+            self.logger.info("Cleared automation: dev=%d param=%d" % (device_idx, param_idx))
+
+        def clip_clear_all_automation(clip, params: Tuple[Any] = ()):
+            """Clear all automation envelopes"""
+            clip.clear_all_envelopes()
+            self.logger.info("Cleared all automation envelopes")
+
+        def clip_read_automation(clip, params: Tuple[Any] = ()):
+            """Read automation value at time: (device_idx, param_idx, time) -> value"""
+            if len(params) < 3:
+                raise ValueError("read_automation requires: device_idx, param_idx, time")
+            device_idx, param_idx = int(params[0]), int(params[1])
+            time_val = float(params[2])
+
+            track = clip.canonical_parent.canonical_parent
+            device = track.devices[device_idx]
+            parameter = device.parameters[param_idx]
+
+            envelope = clip.automation_envelope(parameter)
+            if envelope is not None:
+                val = envelope.value_at_time(time_val)
+                return (device_idx, param_idx, time_val, val)
+            else:
+                return (device_idx, param_idx, time_val, -1.0)
+
+        def clip_debug_envelope(clip, params: Tuple[Any] = ()):
+            """Debug + show envelope in UI: (device_idx, param_idx)"""
+            if len(params) < 2:
+                raise ValueError("debug_envelope requires: device_idx, param_idx")
+            device_idx, param_idx = int(params[0]), int(params[1])
+
+            track = clip.canonical_parent.canonical_parent
+            device = track.devices[device_idx]
+            parameter = device.parameters[param_idx]
+
+            info_parts = []
+
+            # Try to show envelope in UI
+            try:
+                clip.view.show_envelope()
+                info_parts.append("show_envelope:OK")
+            except Exception as e:
+                info_parts.append("show_envelope_ERR:" + str(e))
+
+            # Try to select the parameter's envelope in UI
+            try:
+                clip.view.select_envelope_parameter(parameter)
+                info_parts.append("select_param:OK")
+            except Exception as e:
+                info_parts.append("select_param_ERR:" + str(e))
+
+            envelope = clip.automation_envelope(parameter)
+            if envelope is not None:
+                attrs = [a for a in dir(envelope) if not a.startswith('_')]
+                info_parts.append("ENV_ATTRS:" + ",".join(attrs))
+                try:
+                    v = envelope.value_at_time(2.0)
+                    info_parts.append("VAL@2=%.4f" % v)
+                except Exception as e:
+                    info_parts.append("VAL_ERR:" + str(e))
+                # Check events_in_range
+                try:
+                    events = envelope.events_in_range(0.0, 16.0)
+                    info_parts.append("EVENTS_COUNT=%d" % len(events))
+                    if len(events) > 0:
+                        ev = events[0]
+                        ev_attrs = [a for a in dir(ev) if not a.startswith('_')]
+                        info_parts.append("EV_ATTRS:" + ",".join(ev_attrs))
+                except Exception as e:
+                    info_parts.append("EVENTS_ERR:" + str(e))
+            else:
+                info_parts.append("ENV=None")
+
+            # Count all envelopes
+            try:
+                envs = clip.automation_envelopes
+                info_parts.append("ENVS_COUNT=%d" % len(envs))
+            except Exception as e:
+                info_parts.append("ENVS_ERR:" + str(e))
+
+            self.logger.info("DEBUG_ENVELOPE: " + " | ".join(info_parts))
+            return tuple(info_parts)
+
+        self.osc_server.add_handler("/live/clip/add_automation", create_clip_callback(clip_add_automation))
+        self.osc_server.add_handler("/live/clip/clear_automation", create_clip_callback(clip_clear_automation))
+        self.osc_server.add_handler("/live/clip/clear_all_automation", create_clip_callback(clip_clear_all_automation))
+        self.osc_server.add_handler("/live/clip/read_automation", create_clip_callback(clip_read_automation))
+        self.osc_server.add_handler("/live/clip/debug_envelope", create_clip_callback(clip_debug_envelope))
+
         def clips_filter_handler(params: Tuple):
             # TODO: Pre-cache clip notes
             if len(self._clip_notes_cache) == 0:
